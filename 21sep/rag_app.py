@@ -69,7 +69,7 @@ from chonkie import RecursiveChunker
 
 # ---------- Config ----------
 CONFIG = {
-    "root": "../layer_23/result",        # folder with */products.json
+    "root": "./layer_23/result",        # folder with */products.json
     "persist_dir": "./store",            # cache/index directory
     "export_dir": "./exports",           # optional exports
 
