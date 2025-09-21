@@ -1,22 +1,46 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Merge Daraz category `products.json` files into a single RAG-friendly corpus.
+Builds a RAG-friendly corpus from Daraz category `products.json` files.
 
-- Input  : result/<category>/products.json
-- Output : one of {Markdown (.md), JSONL (.jsonl), Plain text (.txt)}
+- Input   : result/<category>/products.json
+- Outputs : out/daraz_products_corpus.md
+            out/daraz_products_corpus.txt
+            out/daraz_products_corpus.jsonl
 
-Examples:
-  python build_rag_corpus.py --input result --format md    --output daraz_products_corpus.md
-  python build_rag_corpus.py --input result --format jsonl --output daraz_products_corpus.jsonl
-  python build_rag_corpus.py --input result --format txt   --output daraz_products_corpus.txt
+Design for scale:
+- Streams writes (MD/TXT/JSONL) to avoid holding full corpus in memory.
+- Deduplicates across categories using a set of stable product IDs/keys.
+- Caps long fields (description/images/variants) to keep chunks efficient.
+
+Just run:  python build_rag_corpus_all.py
 """
 
-import argparse
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+# ----------------------------
+# Config (edit if needed)
+# ----------------------------
+INPUT_ROOT = Path("./layer_23/result")
+OUT_DIR = Path("out")
+
+# Limits to keep chunks clean and embeddings efficient
+MAX_IMAGES = 8
+MAX_VARIANTS = 20
+MAX_DESC_CHARS = 2500  # cap very long descriptions
+PRINT_EVERY = 2000     # progress log cadence
+
+# Output file names
+MD_PATH = OUT_DIR / "daraz_products_corpus.md"
+TXT_PATH = OUT_DIR / "daraz_products_corpus.txt"
+JSONL_PATH = OUT_DIR / "daraz_products_corpus.jsonl"
+
+# ----------------------------
+# Utilities
+# ----------------------------
 def normalize_url(u: Optional[str]) -> Optional[str]:
     if not u:
         return None
@@ -25,17 +49,14 @@ def normalize_url(u: Optional[str]) -> Optional[str]:
         return "https:" + u
     if u.startswith("http://") or u.startswith("https://"):
         return u
-    # sometimes product_detail_url and detail_url are full https already; otherwise leave as-is
     return u
 
 def category_readable_name(folder: str) -> str:
-    # e.g. "www_daraz_com_bd_shop_bedding_sets" -> "shop bedding sets"
-    # fall back: replace underscores with spaces
-    slug = folder
+    # "www_daraz_com_bd_shop_bedding_sets" -> "shop bedding sets"
     prefix = "www_daraz_com_bd_"
     if folder.startswith(prefix):
-        slug = folder[len(prefix):]
-    return slug.replace("_", " ").strip()
+        folder = folder[len(prefix):]
+    return folder.replace("_", " ").strip()
 
 def safe_get(d: Dict[str, Any], *keys, default=None):
     cur = d
@@ -48,13 +69,15 @@ def safe_get(d: Dict[str, Any], *keys, default=None):
 def clean_text(t: Optional[str]) -> Optional[str]:
     if not t:
         return t
-    # Collapse excessive whitespace
     t = re.sub(r"\s+\n", "\n", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
     t = re.sub(r"[ \t]{2,}", " ", t)
-    return t.strip()
+    t = t.strip()
+    if len(t) > MAX_DESC_CHARS:
+        t = t[:MAX_DESC_CHARS].rstrip() + " …"
+    return t
 
-def list_preview(items: List[str], max_n: int = 10) -> List[str]:
+def list_preview(items: List[str], max_n: int) -> List[str]:
     out = []
     for s in items[:max_n]:
         if isinstance(s, str):
@@ -64,7 +87,7 @@ def list_preview(items: List[str], max_n: int = 10) -> List[str]:
     return out
 
 def unique_stable_key(prod: Dict[str, Any]) -> str:
-    # priority: data_item_id -> detail.url -> detail_url -> data_sku_simple -> product_title + image_url
+    # priority: data_item_id -> detail.url -> detail_url -> product_detail_url -> data_sku_simple -> title+image
     candidates = [
         prod.get("data_item_id"),
         safe_get(prod, "detail", "url"),
@@ -75,7 +98,6 @@ def unique_stable_key(prod: Dict[str, Any]) -> str:
     for c in candidates:
         if c:
             return str(c)
-    # last resort (unlikely collisions, but better than drop)
     return (prod.get("product_title") or "unknown") + "||" + (prod.get("image_url") or "unknown")
 
 def unify_product(prod: Dict[str, Any], category_folder: str, products_path: Path) -> Dict[str, Any]:
@@ -87,34 +109,30 @@ def unify_product(prod: Dict[str, Any], category_folder: str, products_path: Pat
     # Prices
     price = detail.get("price") or {}
     price_disp = price.get("display") or prod.get("product_price") or None
-    price_val = price.get("value")  # numeric or None
-    orig_disp = price.get("original_display") or None
-    orig_val = price.get("original_value")  # numeric or None
-    discount_disp = price.get("discount_display") or None
-    discount_pct = price.get("discount_percent")  # numeric or None
+    price_val = price.get("value")
+    orig_disp = price.get("original_display")
+    discount_disp = price.get("discount_display")
+    discount_pct = price.get("discount_percent")
 
     # Ratings
     rating = detail.get("rating") or {}
     rating_avg = rating.get("average")
     rating_count = rating.get("count")
-    rating_raw = rating.get("raw")
 
     # URLs / images
     url = normalize_url(detail.get("url") or prod.get("detail_url") or prod.get("product_detail_url"))
     image_url = prod.get("image_url")
     images = detail.get("images") or ([image_url] if image_url else [])
     images = [normalize_url(i) for i in images if isinstance(i, str) and i and i.startswith(("http://", "https://", "//"))]
-    images = list_preview([i for i in images if i], max_n=10)
+    images = list_preview([i for i in images if i], max_n=MAX_IMAGES)
 
-    # Variations / options
-    colors = detail.get("colors") or []
-    colors = [c for c in colors if isinstance(c, str)]
-    sizes = detail.get("sizes") or []
-    sizes = [s for s in sizes if isinstance(s, str)]
+    # Options / variants
+    colors = [c for c in (detail.get("colors") or []) if isinstance(c, str)]
+    sizes = [s for s in (detail.get("sizes") or []) if isinstance(s, str)]
 
     variants = detail.get("variants") or []
     variant_summaries = []
-    for v in variants[:20]:  # cap for readability
+    for v in variants[:MAX_VARIANTS]:
         v_color = v.get("color")
         v_price = safe_get(v, "price", "display") or safe_get(v, "price", "value")
         vsizes = v.get("sizes")
@@ -136,17 +154,18 @@ def unify_product(prod: Dict[str, Any], category_folder: str, products_path: Pat
     seller_link = normalize_url(safe_get(detail, "seller", "link"))
     seller_metrics = safe_get(detail, "seller", "metrics") or {}
 
-    description_text = clean_text(safe_get(detail, "details", "description_text") or safe_get(detail, "details", "raw_text"))
-    highlights = safe_get(detail, "details", "highlights") or []
-    specs = safe_get(detail, "details", "specifications") or []
+    description_text = clean_text(
+        safe_get(detail, "details", "description_text") or
+        safe_get(detail, "details", "raw_text")
+    ) or None
 
-    # other helpful top-level bits
+    # Top-level bits
     sku = prod.get("data_sku_simple")
     item_id = prod.get("data_item_id")
     sold_text = prod.get("location")  # e.g., "5.3K sold"
     category_slug = category_readable_name(Path(category_folder).name)
 
-    return {
+    unified = {
         "id": str(item_id) if item_id else unique_stable_key(prod),
         "title": str(title),
         "brand": brand,
@@ -162,14 +181,11 @@ def unify_product(prod: Dict[str, Any], category_folder: str, products_path: Pat
         "price_display": price_disp,
         "price_value": price_val,
         "original_price_display": orig_disp,
-        "original_price_value": orig_val,
         "discount_display": discount_disp,
         "discount_percent": discount_pct,
 
         "rating_average": rating_avg,
         "rating_count": rating_count,
-        "rating_raw": rating_raw,
-
         "sold_text": sold_text,
 
         "colors": colors,
@@ -183,26 +199,33 @@ def unify_product(prod: Dict[str, Any], category_folder: str, products_path: Pat
         "seller_link": seller_link,
         "seller_metrics": seller_metrics,
 
-        "highlights": highlights,
-        "specifications": specs,
         "description": description_text,
     }
+    return unified
 
-def product_to_markdown(p: Dict[str, Any]) -> str:
+# ----------------------------
+# Writers (streaming)
+# ----------------------------
+def write_markdown_header(fmd):
+    fmd.write("# Daraz Product Corpus\n\n")
+    fmd.write("> Document markers: Each product is wrapped by `<!--DOC:START ...-->` and `<!--DOC:END-->` for reliable chunking.\n\n")
+
+def product_to_markdown_block(p: Dict[str, Any]) -> str:
     lines = []
-    lines.append(f"## {p['title']} — Item ID: {p['id']}")
+    # explicit start marker for chunkers
+    lines.append(f"<!--DOC:START id={p['id']} category={p.get('category','')} -->")
+    lines.append(f"## {p['title']}  \n**DocID:** {p['id']}")
     lines.append("")
-    # Core facts
-    core = []
-    if p.get("category"): core.append(f"**Category:** {p['category']}")
-    if p.get("brand"): core.append(f"**Brand:** {p['brand']}")
-    if p.get("sku"): core.append(f"**SKU:** {p['sku']}")
-    if p.get("url"): core.append(f"**URL:** {p['url']}")
-    if p.get("sold_text"): core.append(f"**Sales:** {p['sold_text']}")
-    if core:
-        lines.append("  \n".join(core))
+    meta = []
+    if p.get("category"): meta.append(f"**Category:** {p['category']}")
+    if p.get("brand"): meta.append(f"**Brand:** {p['brand']}")
+    if p.get("sku"): meta.append(f"**SKU:** {p['sku']}")
+    if p.get("url"): meta.append(f"**URL:** {p['url']}")
+    if p.get("sold_text"): meta.append(f"**Sales:** {p['sold_text']}")
+    if meta:
+        lines.append("  \n".join(meta))
         lines.append("")
-    # Price & rating
+    # pricing & rating
     price_bits = []
     pd = p.get("price_display") or p.get("listing_price_display")
     if pd: price_bits.append(f"**Price:** {pd}")
@@ -211,47 +234,36 @@ def product_to_markdown(p: Dict[str, Any]) -> str:
     rating_bits = []
     if p.get("rating_average") is not None:
         rc = p.get("rating_count")
-        if rc is not None:
-            rating_bits.append(f"**Rating:** {p['rating_average']}/5 ({rc} ratings)")
-        else:
-            rating_bits.append(f"**Rating:** {p['rating_average']}/5")
+        rating_bits.append(f"**Rating:** {p['rating_average']}/5" + (f" ({rc} ratings)" if rc is not None else ""))
     if price_bits or rating_bits:
         lines.append("  \n".join(price_bits + rating_bits))
         lines.append("")
-
-    # Options
-    if p.get("colors"):
-        lines.append("**Colors:** " + ", ".join(p["colors"]))
-    if p.get("sizes"):
-        lines.append("**Sizes:** " + ", ".join(p["sizes"]))
+    # options
+    if p.get("colors"): lines.append("**Colors:** " + ", ".join(p["colors"]))
+    if p.get("sizes"): lines.append("**Sizes:** " + ", ".join(p["sizes"]))
     if p.get("variants"):
         lines.append("**Variants (sample):**")
         for v in p["variants"]:
             lines.append(f"- {v}")
     if p.get("colors") or p.get("sizes") or p.get("variants"):
         lines.append("")
-
-    # Delivery / Warranty
+    # delivery / warranty
     if p.get("delivery_options"):
         lines.append("**Delivery Options:**")
         for d in p["delivery_options"]:
             if isinstance(d, dict):
-                title = d.get("title")
-                time = d.get("time")
-                fee = d.get("fee")
-                bits = [title] if title else []
-                if time: bits.append(time)
-                if fee: bits.append(fee)
-                if bits:
-                    lines.append("- " + " — ".join(bits))
+                bits = []
+                if d.get("title"): bits.append(d["title"])
+                if d.get("time"): bits.append(d["time"])
+                if d.get("fee"): bits.append(d["fee"])
+                if bits: lines.append("- " + " — ".join(bits))
         lines.append("")
     if p.get("return_and_warranty"):
         lines.append("**Return & Warranty:**")
         for rw in p["return_and_warranty"]:
             if rw: lines.append(f"- {rw}")
         lines.append("")
-
-    # Seller
+    # seller
     if p.get("seller_name") or p.get("seller_metrics"):
         seller_line = []
         if p.get("seller_name"): seller_line.append(f"**Seller:** {p['seller_name']}")
@@ -266,31 +278,31 @@ def product_to_markdown(p: Dict[str, Any]) -> str:
             if mparts:
                 lines.append("- " + " | ".join(mparts))
         lines.append("")
-
-    # Description
+    # description
     if p.get("description"):
         lines.append("**Description:**")
         lines.append(p["description"])
         lines.append("")
-
-    # Images
+    # images
     if p.get("images"):
         lines.append("**Images (sample):**")
         for im in p["images"]:
             lines.append(f"- {im}")
         lines.append("")
-
-    # Traceability
-    lines.append(f"_Source: {p.get('category_dir')} / products.json_")
+    # traceability
+    src = f"{p.get('category_dir')} / products.json"
+    lines.append(f"_Source: {src}_")
     lines.append("")
     lines.append("---")
-    lines.append("")
+    # explicit end marker
+    lines.append("<!--DOC:END-->")
+    lines.append("")  # final newline
     return "\n".join(lines)
 
-def product_to_text(p: Dict[str, Any]) -> str:
-    # Similar to markdown but without **bold** / headings
+def product_to_text_block(p: Dict[str, Any]) -> str:
     lines = []
-    lines.append(f"PRODUCT: {p['title']}  |  ID: {p['id']}")
+    lines.append(f"### DOC START | id={p['id']} | category={p.get('category','')}")
+    lines.append(f"PRODUCT: {p['title']}")
     if p.get("url"): lines.append(f"URL: {p['url']}")
     if p.get("category"): lines.append(f"CATEGORY: {p['category']}")
     if p.get("brand"): lines.append(f"BRAND: {p['brand']}")
@@ -339,13 +351,14 @@ def product_to_text(p: Dict[str, Any]) -> str:
         lines.append("IMAGES:")
         for im in p["images"]:
             lines.append(f"- {im}")
-    lines.append(f"SOURCE: {p.get('category_dir')} / products.json")
-    lines.append("-----")
-    return "\n".join(lines) + "\n\n"
+    src = f"{p.get('category_dir')} / products.json"
+    lines.append(f"SOURCE: {src}")
+    lines.append("### DOC END")
+    lines.append("")  # newline
+    return "\n".join(lines)
 
 def product_to_jsonl_record(p: Dict[str, Any]) -> Dict[str, Any]:
-    # One JSON per line: { "id":..., "text":..., "metadata":{...} }
-    # The "text" is a compact version of the markdown content.
+    # Compact text for embeddings
     text_lines = []
     text_lines.append(f"{p['title']} (ID: {p['id']})")
     if p.get("brand"): text_lines.append(f"Brand: {p['brand']}")
@@ -372,6 +385,7 @@ def product_to_jsonl_record(p: Dict[str, Any]) -> Dict[str, Any]:
         "price_display": p.get("price_display") or p.get("listing_price_display"),
         "original_price_display": p.get("original_price_display"),
         "discount_display": p.get("discount_display"),
+        "discount_percent": p.get("discount_percent"),
         "rating_average": p.get("rating_average"),
         "rating_count": p.get("rating_count"),
         "sold_text": p.get("sold_text"),
@@ -381,95 +395,77 @@ def product_to_jsonl_record(p: Dict[str, Any]) -> Dict[str, Any]:
     }
     return {"id": p["id"], "text": "\n".join(text_lines), "metadata": metadata}
 
-def find_products_json_files(root: Path) -> List[Path]:
-    return sorted(root.glob("*/products.json"))
-
-def load_products(products_path: Path) -> List[Dict[str, Any]]:
-    try:
-        with products_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return data
-        else:
-            return []
-    except Exception as e:
-        print(f"[WARN] Failed to parse {products_path}: {e}")
-        return []
-
+# ----------------------------
+# Main
+# ----------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Build a RAG-friendly corpus from Daraz products.json files.")
-    ap.add_argument("--input", type=str, default="./layer_23/result", help="Root folder containing category subfolders (default: result)")
-    ap.add_argument("--format", type=str, default="md", choices=["md", "jsonl", "txt"], help="Output format (md/jsonl/txt). Default: md")
-    ap.add_argument("--output", type=str, required=True, help="Output file path")
-    ap.add_argument("--max-images", type=int, default=10, help="Max images to include per product (default: 10)")
-    args = ap.parse_args()
+    if not INPUT_ROOT.exists():
+        raise SystemExit(f"Input folder not found: {INPUT_ROOT}")
 
-    root = Path(args.input)
-    if not root.exists():
-        raise SystemExit(f"Input folder not found: {root}")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    products_files = find_products_json_files(root)
-    if not products_files:
-        raise SystemExit(f"No products.json files found under: {root}")
+    # Prepare outputs (streaming)
+    with MD_PATH.open("w", encoding="utf-8") as fmd, \
+         TXT_PATH.open("w", encoding="utf-8") as ftxt, \
+         JSONL_PATH.open("w", encoding="utf-8") as fjsonl:
 
-    print(f"Found {len(products_files)} products.json files")
+        write_markdown_header(fmd)
+        ftxt.write("DARAZ PRODUCT CORPUS\n\n")
 
-    # load + normalize + dedupe
-    seen: Dict[str, Dict[str, Any]] = {}
-    categories_covered = set()
+        products_files = sorted(INPUT_ROOT.glob("*/products.json"))
+        if not products_files:
+            raise SystemExit(f"No products.json files found under: {INPUT_ROOT}")
 
-    for pfile in products_files:
-        cat_dir = pfile.parent  # result/<category>
-        categories_covered.add(cat_dir.name)
-        products = load_products(pfile)
-        for raw in products:
-            uid = unique_stable_key(raw)
-            unified = unify_product(raw, str(cat_dir), pfile)
-            # If duplicate seen, prefer to preserve the one with brand/title/price if the new one is richer.
-            if uid in seen:
-                old = seen[uid]
-                # naive merge: keep fields that are missing in old
-                for k, v in unified.items():
-                    if (old.get(k) in (None, "", [], {})) and v not in (None, "", [], {}):
-                        old[k] = v
-                # merge categories if different
-                if old.get("category") and unified.get("category") and old["category"] != unified["category"]:
-                    old["category"] = old["category"] + " | " + unified["category"]
-            else:
-                seen[uid] = unified
+        seen_ids = set()
+        total_loaded = 0
+        total_written = 0
+        categories = set()
 
-    all_products = list(seen.values())
-    print(f"Merged products (deduped): {len(all_products)} from {len(categories_covered)} categories")
+        for pfile in products_files:
+            cat_dir = pfile.parent
+            categories.add(cat_dir.name)
 
-    # Trim images to user preference
-    max_images = max(0, int(args.max_images))
-    for p in all_products:
-        if isinstance(p.get("images"), list):
-            p["images"] = p["images"][:max_images]
+            try:
+                data = json.loads(pfile.read_text(encoding="utf-8"))
+                if not isinstance(data, list):
+                    continue
+            except Exception as e:
+                print(f"[WARN] Failed to parse {pfile}: {e}")
+                continue
 
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+            for raw in data:
+                total_loaded += 1
 
-    if args.format == "md":
-        with out_path.open("w", encoding="utf-8") as f:
-            f.write("# Daraz Product Corpus\n\n")
-            for p in all_products:
-                f.write(product_to_markdown(p))
-        print(f"[OK] Wrote Markdown corpus: {out_path}")
+                uid = unique_stable_key(raw)
+                if uid in seen_ids:
+                    continue  # dedupe
+                seen_ids.add(uid)
 
-    elif args.format == "txt":
-        with out_path.open("w", encoding="utf-8") as f:
-            f.write("DARAZ PRODUCT CORPUS\n\n")
-            for p in all_products:
-                f.write(product_to_text(p))
-        print(f"[OK] Wrote plain text corpus: {out_path}")
+                unified = unify_product(raw, str(cat_dir), pfile)
 
-    elif args.format == "jsonl":
-        with out_path.open("w", encoding="utf-8") as f:
-            for p in all_products:
-                rec = product_to_jsonl_record(p)
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        print(f"[OK] Wrote JSONL corpus: {out_path}")
+                # Markdown
+                fmd.write(product_to_markdown_block(unified))
+
+                # Plain text
+                ftxt.write(product_to_text_block(unified))
+
+                # JSONL
+                rec = product_to_jsonl_record(unified)
+                fjsonl.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+                total_written += 1
+                if total_written % PRINT_EVERY == 0:
+                    print(f"[INFO] Processed {total_written:,} products "
+                          f"(loaded so far: {total_loaded:,}, unique IDs: {len(seen_ids):,})")
+
+        # Summary footer (optional)
+        fmd.write(f"\n> Summary: {total_written} products from {len(categories)} categories.\n")
+        ftxt.write(f"\nSUMMARY: {total_written} products from {len(categories)} categories.\n")
+
+    print("[OK] Markdown:", MD_PATH)
+    print("[OK] Text    :", TXT_PATH)
+    print("[OK] JSONL   :", JSONL_PATH)
+    print(f"[DONE] Wrote {total_written} unique products across {len(categories)} categories.")
 
 if __name__ == "__main__":
     main()
