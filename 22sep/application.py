@@ -597,8 +597,8 @@ def stream_answer(model: str, messages: List[Dict[str, str]], temperature: float
 # The UI is split into: sidebar (settings & corpus input), main area (stats, filters, search box),
 # and two-column result layout (left: matches; right: LLM answer).
 
-st.set_page_config(page_title="RAG: Chonkie + BM25 (Daraz)", layout="wide")
-st.title("Daraz Products RAG — Chonkie + BM25")
+st.set_page_config(page_title="RAG: Recursive Chunking + BM25 (Daraz)", layout="wide")
+st.title("Daraz Products RAG — Recursive Chunking + BM25")
 
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
