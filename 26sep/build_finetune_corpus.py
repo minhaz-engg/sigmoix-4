@@ -564,7 +564,7 @@ DPO_F    = OUT_DIR / "ecom_dpo_pairs.jsonl"
 STATS_F  = OUT_DIR / "stats.json"
 
 SEED = 3407
-VAL_RATIO = 0.5                   # ~20% validation
+VAL_RATIO = 0.02                   # ~20% validation
 MAX_CONTEXT_CHARS = 1800
 MAX_TITLE_CHARS = 70               # SEO constraint
 MAX_BULLETS = 6
