@@ -1,10 +1,10 @@
 {
   "total_products_seen": 4835,
   "total_sft_samples": 19306,
-  "train_samples": 18920,
-  "val_samples": 386,
+  "train_samples": 9653,
+  "val_samples": 9653,
   "dpo_pairs": 4835,
-  "val_ratio": 0.02,
+  "val_ratio": 0.5,
   "max_context_chars": 1800,
   "tasks": [
     "Buyer summary (EN)",
