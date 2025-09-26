@@ -565,11 +565,11 @@ STATS_F  = OUT_DIR / "stats.json"
 
 SEED = 3407
 VAL_RATIO = 0.02                   # ~2% validation
-MAX_CONTEXT_CHARS = 3600
+MAX_CONTEXT_CHARS = 1800
 MAX_TITLE_CHARS = 70               # SEO constraint
 MAX_BULLETS = 6
-MIN_TASKS_PER_RECORD = 4           # sample from available tasks per record
-MAX_TASKS_PER_RECORD = 7
+MIN_TASKS_PER_RECORD = 3           # sample from available tasks per record
+MAX_TASKS_PER_RECORD = 5
 
 # ----------------------------
 # Utilities & Normalizers
