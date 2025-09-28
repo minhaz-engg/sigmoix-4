@@ -1,17 +1,28 @@
 {
   "total_products_seen": 1200,
-  "total_sft_samples": 4788,
-  "train_samples": 4693,
-  "val_samples": 95,
+  "total_sft_samples": 3002,
+  "train_samples": 2942,
+  "val_samples": 60,
   "dpo_pairs": 0,
   "val_ratio": 0.02,
-  "max_context_chars": 1800,
-  "tasks": [
+  "max_context_chars": 800,
+  "caps": {
+    "min_tasks_per_record": 2,
+    "max_tasks_per_record": 3,
+    "max_bullets": 4,
+    "max_faq": 2
+  },
+  "downscale_flags_used": {
+    "sample_frac": null,
+    "max_products": null,
+    "max_total_samples": null
+  },
+  "tasks_pool": [
     "Buyer summary (EN)",
     "Strict JSON extraction with normalization (EN)",
     "SEO title (<= 70 chars) (EN)",
-    "Feature bullets (Markdown, EN)",
-    "FAQ Q&A (EN)",
+    "Feature bullets (Markdown, EN; ≤4)",
+    "FAQ Q&A (EN; ≤2)",
     "Compact Markdown table (EN)"
   ]
 }
