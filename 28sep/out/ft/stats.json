@@ -1,0 +1,17 @@
+{
+  "total_products_seen": 1200,
+  "total_sft_samples": 4788,
+  "train_samples": 4693,
+  "val_samples": 95,
+  "dpo_pairs": 0,
+  "val_ratio": 0.02,
+  "max_context_chars": 1800,
+  "tasks": [
+    "Buyer summary (EN)",
+    "Strict JSON extraction with normalization (EN)",
+    "SEO title (<= 70 chars) (EN)",
+    "Feature bullets (Markdown, EN)",
+    "FAQ Q&A (EN)",
+    "Compact Markdown table (EN)"
+  ]
+}
